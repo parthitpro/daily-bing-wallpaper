@@ -8,4 +8,7 @@ echo ========================================================
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0src\Update-BingWallpaper.ps1"
 echo.
-pause
+echo ========================================================
+echo   Finished! Press any key to close this window.
+echo ========================================================
+pause >nul

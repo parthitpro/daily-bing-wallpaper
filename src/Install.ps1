@@ -8,25 +8,26 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WorkerScript = Join-Path -Path $ScriptDir -ChildPath "Update-BingWallpaper.ps1"
 $TaskName = "DailyBingWallpaper"
 
-if (-not (Test-Path -Path $WorkerScript)) {
+if (-not (Test-Path -LiteralPath $WorkerScript)) {
     Write-Error "Could not find Update-BingWallpaper.ps1 at $WorkerScript"
     exit 1
 }
 
 Write-Host "Registering scheduled task '$TaskName'..." -ForegroundColor Cyan
 
-# Define Action: run powershell hidden
+# Define Action: run powershell hidden with execution policy bypass
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WorkerScript`""
 
 # Define Triggers:
-# 1. At user logon
-$TriggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# 1. At user logon (using current user account name)
+$CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$TriggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
 
 # 2. Daily at 9:00 AM
 $TriggerDaily = New-ScheduledTaskTrigger -Daily -At "09:00 AM"
 
-# Define Settings: Wake to run if asleep, run as soon as possible if missed
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+# Define Settings: run on battery, start when available if missed, wake to run
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -WakeToRun -MultipleInstances IgnoreNew
 
 # Unregister previous instance if existing
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -36,6 +37,6 @@ Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($TriggerLo
 
 Write-Host "Task '$TaskName' registered successfully!" -ForegroundColor Green
 
-# Run once now to immediately set today's wallpaper
-Write-Host "Fetching and setting today's wallpaper now..." -ForegroundColor Cyan
+# Run once now to verify
+Write-Host "Verifying wallpaper update now..." -ForegroundColor Cyan
 & $WorkerScript
