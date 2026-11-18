@@ -23,7 +23,7 @@ A lightweight, open-source Windows automation tool that updates your desktop wal
 2. **Windows 11 Compatibility**: Automatically handles the Windows 11 Spotlight override to ensure wallpapers apply reliably across updates.
 3. **Smart 18-Hour Caching**: Automatically uses the cached image if updated within the last 18 hours, preventing unnecessary network queries.
 4. **Auto-Cleanup (Pruning)**: Automatically cleans up wallpapers older than 30 days so your disk space remains pristine.
-5. **Caption & Metadata Preservation**: Saves a companion `.json` file containing title, photographer/agency copyright, and description.
+5. **Caption & Metadata Preservation**: Saves a companion `.json` file containing the date, title, photographer/agency copyright, and source URLs.
 6. **Zero External Dependencies**: Works out-of-the-box on clean Windows installations using built-in PowerShell 5.1+ and Task Scheduler.
 
 ---

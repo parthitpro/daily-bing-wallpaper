@@ -62,6 +62,7 @@ function Apply-WallpaperFile {
         $Bg = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers' -Name BackgroundType -ErrorAction SilentlyContinue).BackgroundType
         if ($null -ne $Bg -and $Bg -ne 0) {
             Write-Warning "Could not switch Windows out of Spotlight mode. Current mode: $Bg"
+            return $false
         }
     } catch {}
 
@@ -118,6 +119,10 @@ $Stream = $null
 $Reader = $null
 try {
     $WebResp = $WebReq.GetResponse()
+    if ($WebResp.ContentType -notmatch 'json') {
+        Write-Warning "Unexpected Bing API content type: $($WebResp.ContentType)"
+        exit 1
+    }
     $Stream = $WebResp.GetResponseStream()
     $Reader = New-Object System.IO.StreamReader($Stream)
     $RawJson = $Reader.ReadToEnd()
