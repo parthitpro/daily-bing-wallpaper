@@ -2,22 +2,50 @@
 <#
 .SYNOPSIS
     Downloads and applies the daily Bing 4K UHD wallpaper on Windows.
+.DESCRIPTION
+    Hardened daily Bing wallpaper automation conforming to FINAL_AUDIT standards:
+    - 18-hour cache check with full JPEG header + EOF trailer verification.
+    - Full [Uri] host pinning & parameter URL encoding.
+    - Process-isolated atomic download (.PID.tmp) with finally-block stream disposal.
+    - Connection + ReadWrite timeouts on all network calls.
+    - Strict date parse validation.
+    - Verified Windows 11 BackgroundType registry read-back.
+    - Win32 SystemParametersInfo status verification with Explorer broadcast.
+    - Validated retention pruning range.
 #>
 
 [CmdletBinding()]
 param(
     [string]$Market = "auto",
-    [int]$RetentionDays = 30
+    [ValidateRange(1, 365)][int]$RetentionDays = 30
 )
 
-# Use TLS 1.2
+# Enforce TLS 1.2
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# 1. Establish Directories
+# 1. Establish Directories (P3-1: fallback to $env:USERPROFILE if MyPictures empty)
 $PicturesDir = [Environment]::GetFolderPath('MyPictures')
+if ([string]::IsNullOrWhiteSpace($PicturesDir)) {
+    $PicturesDir = Join-Path -Path $env:USERPROFILE -ChildPath 'Pictures'
+}
 $SaveDir = Join-Path -Path $PicturesDir -ChildPath 'BingWallpapers'
 if (-not (Test-Path -LiteralPath $SaveDir)) {
     New-Item -ItemType Directory -Path $SaveDir -Force | Out-Null
+}
+
+# Helper: Test for complete JPEG file (magic bytes FF D8 FF and EOF trailer FF D9) (P3-3)
+function Test-JpegFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $Bytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($Bytes.Length -lt 4) { return $false }
+        $ValidHeader = ($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8 -and $Bytes[2] -eq 0xFF)
+        $ValidTrailer = ($Bytes[$Bytes.Length - 2] -eq 0xFF -and $Bytes[$Bytes.Length - 1] -eq 0xD9)
+        return ($ValidHeader -and $ValidTrailer)
+    } catch {
+        return $false
+    }
 }
 
 function Apply-WallpaperFile {
@@ -28,6 +56,14 @@ function Apply-WallpaperFile {
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value 10 -ErrorAction SilentlyContinue
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name TileWallpaper  -Value 0 -ErrorAction SilentlyContinue
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallPaper -Value $FilePath -ErrorAction SilentlyContinue
+
+    # Verify BackgroundType read-back (P2-5)
+    try {
+        $Bg = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers' -Name BackgroundType -ErrorAction SilentlyContinue).BackgroundType
+        if ($null -ne $Bg -and $Bg -ne 0) {
+            Write-Warning "Could not switch Windows out of Spotlight mode. Current mode: $Bg"
+        }
+    } catch {}
 
     $Definition = @"
 using System;
@@ -51,20 +87,7 @@ public class WinWallpaperApi {
         Write-Host "Desktop wallpaper updated to: $DisplayTitle" -ForegroundColor Green
         return $true
     } else {
-        Write-Warning "SystemParametersInfo returned code: $Spi"
-        return $false
-    }
-}
-
-# Helper: check for JPEG magic bytes (FF D8 FF)
-function Test-JpegFile {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    try {
-        $Bytes = [System.IO.File]::ReadAllBytes($Path)
-        if ($Bytes.Length -lt 4) { return $false }
-        return ($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8 -and $Bytes[2] -eq 0xFF)
-    } catch {
+        Write-Warning "SystemParametersInfo returned failure code: $Spi"
         return $false
     }
 }
@@ -83,24 +106,30 @@ if ($RecentFiles.Count -gt 0) {
     }
 }
 
-# 3. Query Bing Public API
-$ApiUrl = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=$Market"
+# 3. Query Bing Public API with URL-encoding and ReadWriteTimeout (P3-2, P3-5)
+$ApiUrl = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=" + [Uri]::EscapeDataString($Market)
 $WebReq = [System.Net.HttpWebRequest]::Create($ApiUrl)
 $WebReq.Timeout = 15000
-$WebReq.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BingDailyWallpaper/2.0"
+$WebReq.ReadWriteTimeout = 15000
+$WebReq.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BingDailyWallpaper/2.1"
 
+$WebResp = $null
+$Stream = $null
+$Reader = $null
 try {
     $WebResp = $WebReq.GetResponse()
     $Stream = $WebResp.GetResponseStream()
     $Reader = New-Object System.IO.StreamReader($Stream)
     $RawJson = $Reader.ReadToEnd()
-    $Reader.Close()
-    $WebResp.Close()
     $Data = $RawJson | ConvertFrom-Json
     $ImageInfo = $Data.images[0]
 } catch {
     Write-Warning "Failed to reach Bing API: $_"
     exit 1
+} finally {
+    if ($Reader)  { $Reader.Dispose() }
+    if ($Stream)  { $Stream.Dispose() }
+    if ($WebResp) { $WebResp.Dispose() }
 }
 
 if (-not $ImageInfo) {
@@ -108,10 +137,11 @@ if (-not $ImageInfo) {
     exit 1
 }
 
-# 4. Field Validation
+# 4. Strict Date & URL Validation (P4-3: DateTime exact parse)
 $StartDate = "$($ImageInfo.startdate)".Trim()
-if ($StartDate -notmatch '^\d{8}$') {
-    Write-Warning "Invalid date format from API: $StartDate"
+$ParsedDate = [DateTime]::MinValue
+if (-not [DateTime]::TryParseExact($StartDate, "yyyyMMdd", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$ParsedDate)) {
+    Write-Warning "Invalid date format from Bing API: $StartDate"
     exit 1
 }
 
@@ -140,25 +170,29 @@ $StdUrl = Resolve-BingUrl $ImageInfo.url
 $TargetFile = Join-Path -Path $SaveDir -ChildPath "Bing_$StartDate.jpg"
 $MetaFile   = Join-Path -Path $SaveDir -ChildPath "Bing_$StartDate.json"
 
-# 5. Atomic Download with validation and timeout
+# 5. Atomic Download with unique PID temp file, ReadWriteTimeout, and full validation (P1-1, P3-3, P3-4, P3-5, P3-7)
 function Download-FileSafely {
     param([string]$SourceUrl, [string]$DestPath)
     if ([string]::IsNullOrWhiteSpace($SourceUrl)) { return $false }
-    $TmpPath = $DestPath + ".tmp"
+    $TmpPath = $DestPath + ".$PID.tmp"
     $Req = [System.Net.HttpWebRequest]::Create($SourceUrl)
     $Req.Timeout = 20000
-    $Req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BingDailyWallpaper/2.0"
+    $Req.ReadWriteTimeout = 20000
+    $Req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BingDailyWallpaper/2.1"
 
+    $Resp = $null
+    $RespStream = $null
+    $FileStream = $null
     try {
         $Resp = $Req.GetResponse()
-        $Stream = $Resp.GetResponseStream()
+        $RespStream = $Resp.GetResponseStream()
         $FileStream = [System.IO.File]::Create($TmpPath)
-        $Stream.CopyTo($FileStream)
+        $RespStream.CopyTo($FileStream)
+        $FileStream.Flush()
         $FileStream.Close()
-        $Stream.Close()
-        $Resp.Close()
+        $FileStream = $null
 
-        if (Test-JpegFile $TmpPath) {
+        if (Test-JpegFile -Path $TmpPath) {
             Move-Item -LiteralPath $TmpPath -Destination $DestPath -Force
             return $true
         } else {
@@ -166,13 +200,29 @@ function Download-FileSafely {
             return $false
         }
     } catch {
-        Remove-Item -LiteralPath $TmpPath -Force -ErrorAction SilentlyContinue
         return $false
+    } finally {
+        if ($FileStream) { $FileStream.Dispose() }
+        if ($RespStream) { $RespStream.Dispose() }
+        if ($Resp)       { $Resp.Dispose() }
+        if (Test-Path -LiteralPath $TmpPath) {
+            Remove-Item -LiteralPath $TmpPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
+# P1-1: Validate existing target if present; re-download if corrupt
 $Success = $false
-if (-not (Test-Path -LiteralPath $TargetFile)) {
+if (Test-Path -LiteralPath $TargetFile) {
+    if (Test-JpegFile -Path $TargetFile) {
+        $Success = $true
+    } else {
+        Write-Warning "Existing target file is corrupt. Re-downloading..."
+        Remove-Item -LiteralPath $TargetFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if (-not $Success) {
     Write-Host "Downloading today's Bing wallpaper: $Title" -ForegroundColor Cyan
     if ($UhdUrl) {
         $Success = Download-FileSafely -SourceUrl $UhdUrl -DestPath $TargetFile
@@ -182,8 +232,6 @@ if (-not (Test-Path -LiteralPath $TargetFile)) {
         $Success = Download-FileSafely -SourceUrl $StdUrl -DestPath $TargetFile
         if ($Success) { Write-Host "Downloaded 1080p image successfully." -ForegroundColor Green }
     }
-} else {
-    $Success = $true
 }
 
 if (-not $Success -or -not (Test-Path -LiteralPath $TargetFile)) {
@@ -205,7 +253,7 @@ Set-Content -LiteralPath $MetaFile -Value $Meta -Encoding UTF8
 $Applied = Apply-WallpaperFile -FilePath $TargetFile -DisplayTitle "$Title ($StartDate)"
 if (-not $Applied) { exit 1 }
 
-# 7. Prune older files
+# 7. Prune older files (P3-6: ValidateRange on param)
 try {
     $Cutoff = (Get-Date).AddDays(-$RetentionDays)
     Get-ChildItem -LiteralPath $SaveDir -Filter "Bing_*" | Where-Object {
