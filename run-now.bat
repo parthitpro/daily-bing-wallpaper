@@ -1,0 +1,11 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+title Fetching Today's Bing Wallpaper...
+echo ========================================================
+echo   Updating to today's Bing 4K Wallpaper...
+echo ========================================================
+echo.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0src\Update-BingWallpaper.ps1"
+echo.
+pause
